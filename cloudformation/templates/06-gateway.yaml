@@ -1,0 +1,250 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  Portfolio Advisory Copilot - AgentCore Gateway (MCP). Inbound: the advisor's Microsoft Entra ID access token, validated with
+  the shared discovery URL, audience and azp claim (the Gateway is the auth boundary; tools are identity-agnostic and
+  reusable). Targets - no agents, only tools:
+  1 policy-kb (Lambda), 2 portfolio-db (Lambda), 3 compliance-rules (Lambda), 4 portfolio-analytics (Lambda over
+  the VPC Code Interpreter), 5 quant-mcp (MCP server on an AgentCore Runtime, SigV4 with the Gateway role).
+
+Parameters:
+  Prefix:
+    Type: String
+    AllowedPattern: "^[a-z][a-z0-9-]{2,40}$"
+  DiscoveryUrl:
+    Type: String
+    AllowedPattern: "^https://.+/\\.well-known/openid-configuration$"
+  JwtAudience:
+    Type: String
+  JwtAzp:
+    Type: String
+    AllowedPattern: "^[A-Za-z0-9_.-]+$"
+  KbFunctionArn:
+    Type: String
+  DdbFunctionArn:
+    Type: String
+  ComplianceFunctionArn:
+    Type: String
+  AnalyticsFunctionArn:
+    Type: String
+  QuantMcpRuntimeArn:
+    Type: String
+  QuantMcpRuntimeUrl:
+    Type: String
+
+Resources:
+  GatewayRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${Prefix}-gateway-role
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: bedrock-agentcore.amazonaws.com }
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals: { aws:SourceAccount: !Ref AWS::AccountId }
+              ArnLike: { aws:SourceArn: !Sub "arn:aws:bedrock-agentcore:${AWS::Region}:${AWS::AccountId}:gateway/*" }
+      Policies:
+        - PolicyName: gateway
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: LambdaTargets
+                Effect: Allow
+                Action: lambda:InvokeFunction
+                Resource: [!Ref KbFunctionArn, !Ref DdbFunctionArn, !Ref ComplianceFunctionArn, !Ref AnalyticsFunctionArn]
+              - Sid: McpRuntimeTarget
+                Effect: Allow
+                Action: bedrock-agentcore:InvokeAgentRuntime
+                Resource: [!Ref QuantMcpRuntimeArn, !Sub "${QuantMcpRuntimeArn}/*"]
+
+  Gateway:
+    Type: AWS::BedrockAgentCore::Gateway
+    Properties:
+      Name: !Sub ${Prefix}-gateway
+      Description: Enterprise Portfolio Advisory Copilot tool gateway
+      RoleArn: !GetAtt GatewayRole.Arn
+      ProtocolType: MCP
+      ProtocolConfiguration:
+        Mcp:
+          SupportedVersions: ["2025-06-18", "2025-03-26"]
+          SearchType: SEMANTIC
+          Instructions: Portfolio, policy, compliance and quantitative tools for advisor portfolio reviews.
+      AuthorizerType: CUSTOM_JWT
+      AuthorizerConfiguration:
+        CustomJWTAuthorizer:
+          DiscoveryUrl: !Ref DiscoveryUrl
+          AllowedAudience: [!Ref JwtAudience]
+          CustomClaims:
+            - InboundTokenClaimName: azp
+              InboundTokenClaimValueType: STRING
+              AuthorizingClaimMatchValue:
+                ClaimMatchOperator: EQUALS
+                ClaimMatchValue: { MatchValueString: !Ref JwtAzp }
+      Tags: { project: !Ref Prefix }
+
+  PolicyKbTarget:
+    Type: AWS::BedrockAgentCore::GatewayTarget
+    Properties:
+      GatewayIdentifier: !GetAtt Gateway.GatewayIdentifier
+      Name: policy-kb
+      Description: Bedrock Knowledge Base (S3 Vectors) over firm investment & ESG policies
+      CredentialProviderConfigurations:
+        - CredentialProviderType: GATEWAY_IAM_ROLE
+      TargetConfiguration:
+        Mcp:
+          Lambda:
+            LambdaArn: !Ref KbFunctionArn
+            ToolSchema:
+              InlinePayload:
+                - Name: search_investment_policy
+                  Description: Semantic search over the firm Investment Policy Statement (allocation limits by risk profile, single-stock and sector concentration limits, ESG negative screens, rebalancing rules). Returns cited passages.
+                  InputSchema:
+                    Type: object
+                    Properties:
+                      query: { Type: string, Description: Natural-language policy question }
+                      top_k: { Type: integer, Description: "Passages to return (1-10, default 4)" }
+                      _meta:
+                        Type: object
+                        Description: Optional W3C trace context carrier
+                        Properties:
+                          traceparent: { Type: string }
+                          tracestate: { Type: string }
+                    Required: [query]
+
+  PortfolioDbTarget:
+    Type: AWS::BedrockAgentCore::GatewayTarget
+    DependsOn: PolicyKbTarget          # serialize target creation on the same gateway
+    Properties:
+      GatewayIdentifier: !GetAtt Gateway.GatewayIdentifier
+      Name: portfolio-db
+      Description: ClientPortfolios DynamoDB lookups
+      CredentialProviderConfigurations:
+        - CredentialProviderType: GATEWAY_IAM_ROLE
+      TargetConfiguration:
+        Mcp:
+          Lambda:
+            LambdaArn: !Ref DdbFunctionArn
+            ToolSchema:
+              InlinePayload:
+                - Name: get_client_portfolio
+                  Description: Fetch holdings, cash balance, risk profile, ESG mandate and advisor of record for a client.
+                  InputSchema:
+                    Type: object
+                    Properties:
+                      client_id: { Type: string, Description: "Client identifier, e.g. CLIENT-8801" }
+                      _meta:
+                        Type: object
+                        Description: Optional W3C trace context carrier
+                        Properties:
+                          traceparent: { Type: string }
+                          tracestate: { Type: string }
+                    Required: [client_id]
+
+  ComplianceTarget:
+    Type: AWS::BedrockAgentCore::GatewayTarget
+    DependsOn: PortfolioDbTarget
+    Properties:
+      GatewayIdentifier: !GetAtt Gateway.GatewayIdentifier
+      Name: compliance-rules
+      Description: Deterministic IPS compliance rules engine (allocation, concentration, ESG)
+      CredentialProviderConfigurations:
+        - CredentialProviderType: GATEWAY_IAM_ROLE
+      TargetConfiguration:
+        Mcp:
+          Lambda:
+            LambdaArn: !Ref ComplianceFunctionArn
+            ToolSchema:
+              InlinePayload:
+                - Name: review_compliance
+                  Description: Review current holdings, or holdings after proposed trades, against the firm Investment Policy Statement. Returns status APPROVED, APPROVED_WITH_WARNINGS or REJECTED with rule-level findings.
+                  InputSchema:
+                    Type: object
+                    Properties:
+                      portfolio: { Type: object, Description: "ClientPortfolios record (holdings with current_price, cash_balance, risk_profile, esg_mandate)" }
+                      proposed_trades:
+                        Type: array
+                        Description: Optional trades to evaluate post-trade
+                        Items:
+                          Type: object
+                          Properties:
+                            ticker: { Type: string }
+                            action: { Type: string, Description: BUY or SELL }
+                            shares: { Type: number }
+                            price: { Type: number }
+                      requested_by: { Type: string, Description: Optional requester id recorded for audit }
+                      _meta:
+                        Type: object
+                        Description: Optional W3C trace context carrier
+                        Properties:
+                          traceparent: { Type: string }
+                          tracestate: { Type: string }
+                    Required: [portfolio]
+
+  AnalyticsTarget:
+    Type: AWS::BedrockAgentCore::GatewayTarget
+    DependsOn: ComplianceTarget
+    Properties:
+      GatewayIdentifier: !GetAtt Gateway.GatewayIdentifier
+      Name: portfolio-analytics
+      Description: Portfolio concentration and risk analytics executed on an AgentCore Code Interpreter (VPC mode)
+      CredentialProviderConfigurations:
+        - CredentialProviderType: GATEWAY_IAM_ROLE
+      TargetConfiguration:
+        Mcp:
+          Lambda:
+            LambdaArn: !Ref AnalyticsFunctionArn
+            ToolSchema:
+              InlinePayload:
+                - Name: analyze_portfolio
+                  Description: Compute concentration (HHI, effective number of holdings, largest position), cash weight and estimated annual volatility for current holdings and after proposed trades, in a sandboxed Code Interpreter session.
+                  InputSchema:
+                    Type: object
+                    Properties:
+                      portfolio: { Type: object, Description: "ClientPortfolios record (holdings with current_price, cash_balance)" }
+                      proposed_trades:
+                        Type: array
+                        Description: Optional trades to evaluate post-trade
+                        Items:
+                          Type: object
+                          Properties:
+                            ticker: { Type: string }
+                            action: { Type: string, Description: BUY or SELL }
+                            shares: { Type: number }
+                            price: { Type: number }
+                      _meta:
+                        Type: object
+                        Description: Optional W3C trace context carrier
+                        Properties:
+                          traceparent: { Type: string }
+                          tracestate: { Type: string }
+                    Required: [portfolio]
+
+  QuantMcpTarget:
+    Type: AWS::BedrockAgentCore::GatewayTarget
+    DependsOn: AnalyticsTarget
+    Properties:
+      GatewayIdentifier: !GetAtt Gateway.GatewayIdentifier
+      Name: quant-mcp
+      Description: Quant Calculator MCP server on AgentCore Runtime (port 8000, /mcp)
+      CredentialProviderConfigurations:
+        - CredentialProviderType: GATEWAY_IAM_ROLE
+          CredentialProvider:
+            IamCredentialProvider: { Service: bedrock-agentcore, Region: !Ref AWS::Region }
+      MetadataConfiguration:
+        AllowedRequestHeaders: [traceparent, tracestate, baggage]
+      TargetConfiguration:
+        Mcp:
+          McpServer:
+            Endpoint: !Sub ${QuantMcpRuntimeUrl}/invocations?qualifier=DEFAULT
+
+Outputs:
+  GatewayId:
+    Value: !GetAtt Gateway.GatewayIdentifier
+  GatewayArn:
+    Value: !GetAtt Gateway.GatewayArn
+  GatewayUrl:
+    Value: !GetAtt Gateway.GatewayUrl
+  GatewayRoleArn:
+    Value: !GetAtt GatewayRole.Arn

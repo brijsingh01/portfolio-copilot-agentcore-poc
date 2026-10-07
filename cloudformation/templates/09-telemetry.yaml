@@ -1,0 +1,443 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  Portfolio Advisory Copilot - per-environment AgentCore log and trace delivery (the console's "Log deliveries
+  and tracing" panel). Vended APPLICATION_LOGS / USAGE_LOGS go to CloudWatch Logs and service-side TRACES go to
+  X-Ray (Transaction Search, aws/spans) for every Runtime, the Code Interpreter, the Gateway, Memory and each
+  workload identity. Requires Transaction Search (09-observability or already enabled). Deliveries are created
+  one after another because concurrent delivery changes against one destination fail.
+
+Parameters:
+  Prefix:
+    Type: String
+    AllowedPattern: "^[a-z][a-z0-9-]{2,40}$"
+  LogRetentionDays:
+    Type: Number
+    Default: 14
+    AllowedValues: [1, 3, 5, 7, 14, 30, 60, 90, 180, 365]
+  QuantMcpRuntimeArn:
+    Type: String
+    AllowedPattern: "^arn:aws[a-z-]*:bedrock-agentcore:[a-z0-9-]+:[0-9]{12}:runtime/.+$"
+  QuantMcpWorkloadIdentityArn:
+    Type: String
+    AllowedPattern: "^arn:aws[a-z-]*:bedrock-agentcore:[a-z0-9-]+:[0-9]{12}:workload-identity-directory/.+$"
+  MarketAnalystRuntimeArn:
+    Type: String
+    AllowedPattern: "^arn:aws[a-z-]*:bedrock-agentcore:[a-z0-9-]+:[0-9]{12}:runtime/.+$"
+  MarketAnalystWorkloadIdentityArn:
+    Type: String
+    AllowedPattern: "^arn:aws[a-z-]*:bedrock-agentcore:[a-z0-9-]+:[0-9]{12}:workload-identity-directory/.+$"
+  OrchestratorRuntimeArn:
+    Type: String
+    AllowedPattern: "^arn:aws[a-z-]*:bedrock-agentcore:[a-z0-9-]+:[0-9]{12}:runtime/.+$"
+  OrchestratorWorkloadIdentityArn:
+    Type: String
+    AllowedPattern: "^arn:aws[a-z-]*:bedrock-agentcore:[a-z0-9-]+:[0-9]{12}:workload-identity-directory/.+$"
+  CodeInterpreterArn:
+    Type: String
+    AllowedPattern: "^arn:aws[a-z-]*:bedrock-agentcore:[a-z0-9-]+:[0-9]{12}:code-interpreter-custom/.+$"
+  GatewayArn:
+    Type: String
+    AllowedPattern: "^arn:aws[a-z-]*:bedrock-agentcore:[a-z0-9-]+:[0-9]{12}:gateway/.+$"
+  GatewayWorkloadIdentityArn:
+    Type: String
+    AllowedPattern: "^arn:aws[a-z-]*:bedrock-agentcore:[a-z0-9-]+:[0-9]{12}:workload-identity-directory/.+$"
+  MemoryArn:
+    Type: String
+    AllowedPattern: "^arn:aws[a-z-]*:bedrock-agentcore:[a-z0-9-]+:[0-9]{12}:memory/.+$"
+
+Resources:
+  # ------------------------------------------------------------------ shared X-Ray destination (Transaction Search)
+  TracesDestination:
+    Type: AWS::Logs::DeliveryDestination
+    Properties:
+      Name: !Sub ${Prefix}-traces
+      DeliveryDestinationType: XRAY
+  # ------------------------------------------------------------------ runtime: quant-mcp
+  QuantMcpRuntimeLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub
+        - /aws/vendedlogs/bedrock-agentcore/${Id}
+        - Id: !Select [1, !Split ["/", !Ref QuantMcpRuntimeArn]]
+      RetentionInDays: !Ref LogRetentionDays
+  QuantMcpRuntimeLogsDestination:
+    Type: AWS::Logs::DeliveryDestination
+    Properties:
+      Name: !Sub ${Prefix}-quant-mcp-runtime-logs
+      DeliveryDestinationType: CWL
+      DestinationResourceArn: !Sub arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:${QuantMcpRuntimeLogGroup}
+  QuantMcpRuntimeLogsSource:
+    Type: AWS::Logs::DeliverySource
+    Properties:
+      Name: !Sub ${Prefix}-quant-mcp-runtime-logs
+      ResourceArn: !Ref QuantMcpRuntimeArn
+      LogType: APPLICATION_LOGS
+  QuantMcpRuntimeLogsDelivery:
+    Type: AWS::Logs::Delivery
+    Properties:
+      DeliverySourceName: !Ref QuantMcpRuntimeLogsSource
+      DeliveryDestinationArn: !GetAtt QuantMcpRuntimeLogsDestination.Arn
+  QuantMcpRuntimeUsageSource:
+    Type: AWS::Logs::DeliverySource
+    Properties:
+      Name: !Sub ${Prefix}-quant-mcp-runtime-usage
+      ResourceArn: !Ref QuantMcpRuntimeArn
+      LogType: USAGE_LOGS
+  QuantMcpRuntimeUsageDelivery:
+    Type: AWS::Logs::Delivery
+    DependsOn: QuantMcpRuntimeLogsDelivery
+    Properties:
+      DeliverySourceName: !Ref QuantMcpRuntimeUsageSource
+      DeliveryDestinationArn: !GetAtt QuantMcpRuntimeLogsDestination.Arn
+  QuantMcpRuntimeTracesSource:
+    Type: AWS::Logs::DeliverySource
+    Properties:
+      Name: !Sub ${Prefix}-quant-mcp-runtime-traces
+      ResourceArn: !Ref QuantMcpRuntimeArn
+      LogType: TRACES
+  QuantMcpRuntimeTracesDelivery:
+    Type: AWS::Logs::Delivery
+    DependsOn: QuantMcpRuntimeUsageDelivery
+    Properties:
+      DeliverySourceName: !Ref QuantMcpRuntimeTracesSource
+      DeliveryDestinationArn: !GetAtt TracesDestination.Arn
+  # ------------------------------------------------------------------ runtime: market-analyst
+  MarketAnalystRuntimeLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub
+        - /aws/vendedlogs/bedrock-agentcore/${Id}
+        - Id: !Select [1, !Split ["/", !Ref MarketAnalystRuntimeArn]]
+      RetentionInDays: !Ref LogRetentionDays
+  MarketAnalystRuntimeLogsDestination:
+    Type: AWS::Logs::DeliveryDestination
+    Properties:
+      Name: !Sub ${Prefix}-market-analyst-runtime-logs
+      DeliveryDestinationType: CWL
+      DestinationResourceArn: !Sub arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:${MarketAnalystRuntimeLogGroup}
+  MarketAnalystRuntimeLogsSource:
+    Type: AWS::Logs::DeliverySource
+    Properties:
+      Name: !Sub ${Prefix}-market-analyst-runtime-logs
+      ResourceArn: !Ref MarketAnalystRuntimeArn
+      LogType: APPLICATION_LOGS
+  MarketAnalystRuntimeLogsDelivery:
+    Type: AWS::Logs::Delivery
+    DependsOn: QuantMcpRuntimeTracesDelivery
+    Properties:
+      DeliverySourceName: !Ref MarketAnalystRuntimeLogsSource
+      DeliveryDestinationArn: !GetAtt MarketAnalystRuntimeLogsDestination.Arn
+  MarketAnalystRuntimeUsageSource:
+    Type: AWS::Logs::DeliverySource
+    Properties:
+      Name: !Sub ${Prefix}-market-analyst-runtime-usage
+      ResourceArn: !Ref MarketAnalystRuntimeArn
+      LogType: USAGE_LOGS
+  MarketAnalystRuntimeUsageDelivery:
+    Type: AWS::Logs::Delivery
+    DependsOn: MarketAnalystRuntimeLogsDelivery
+    Properties:
+      DeliverySourceName: !Ref MarketAnalystRuntimeUsageSource
+      DeliveryDestinationArn: !GetAtt MarketAnalystRuntimeLogsDestination.Arn
+  MarketAnalystRuntimeTracesSource:
+    Type: AWS::Logs::DeliverySource
+    Properties:
+      Name: !Sub ${Prefix}-market-analyst-runtime-traces
+      ResourceArn: !Ref MarketAnalystRuntimeArn
+      LogType: TRACES
+  MarketAnalystRuntimeTracesDelivery:
+    Type: AWS::Logs::Delivery
+    DependsOn: MarketAnalystRuntimeUsageDelivery
+    Properties:
+      DeliverySourceName: !Ref MarketAnalystRuntimeTracesSource
+      DeliveryDestinationArn: !GetAtt TracesDestination.Arn
+  # ------------------------------------------------------------------ runtime: orchestrator
+  OrchestratorRuntimeLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub
+        - /aws/vendedlogs/bedrock-agentcore/${Id}
+        - Id: !Select [1, !Split ["/", !Ref OrchestratorRuntimeArn]]
+      RetentionInDays: !Ref LogRetentionDays
+  OrchestratorRuntimeLogsDestination:
+    Type: AWS::Logs::DeliveryDestination
+    Properties:
+      Name: !Sub ${Prefix}-orchestrator-runtime-logs
+      DeliveryDestinationType: CWL
+      DestinationResourceArn: !Sub arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:${OrchestratorRuntimeLogGroup}
+  OrchestratorRuntimeLogsSource:
+    Type: AWS::Logs::DeliverySource
+    Properties:
+      Name: !Sub ${Prefix}-orchestrator-runtime-logs
+      ResourceArn: !Ref OrchestratorRuntimeArn
+      LogType: APPLICATION_LOGS
+  OrchestratorRuntimeLogsDelivery:
+    Type: AWS::Logs::Delivery
+    DependsOn: MarketAnalystRuntimeTracesDelivery
+    Properties:
+      DeliverySourceName: !Ref OrchestratorRuntimeLogsSource
+      DeliveryDestinationArn: !GetAtt OrchestratorRuntimeLogsDestination.Arn
+  OrchestratorRuntimeUsageSource:
+    Type: AWS::Logs::DeliverySource
+    Properties:
+      Name: !Sub ${Prefix}-orchestrator-runtime-usage
+      ResourceArn: !Ref OrchestratorRuntimeArn
+      LogType: USAGE_LOGS
+  OrchestratorRuntimeUsageDelivery:
+    Type: AWS::Logs::Delivery
+    DependsOn: OrchestratorRuntimeLogsDelivery
+    Properties:
+      DeliverySourceName: !Ref OrchestratorRuntimeUsageSource
+      DeliveryDestinationArn: !GetAtt OrchestratorRuntimeLogsDestination.Arn
+  OrchestratorRuntimeTracesSource:
+    Type: AWS::Logs::DeliverySource
+    Properties:
+      Name: !Sub ${Prefix}-orchestrator-runtime-traces
+      ResourceArn: !Ref OrchestratorRuntimeArn
+      LogType: TRACES
+  OrchestratorRuntimeTracesDelivery:
+    Type: AWS::Logs::Delivery
+    DependsOn: OrchestratorRuntimeUsageDelivery
+    Properties:
+      DeliverySourceName: !Ref OrchestratorRuntimeTracesSource
+      DeliveryDestinationArn: !GetAtt TracesDestination.Arn
+  # ------------------------------------------------------------------ code interpreter (VPC)
+  CodeInterpreterLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub
+        - /aws/vendedlogs/bedrock-agentcore/${Id}
+        - Id: !Select [1, !Split ["/", !Ref CodeInterpreterArn]]
+      RetentionInDays: !Ref LogRetentionDays
+  CodeInterpreterLogsDestination:
+    Type: AWS::Logs::DeliveryDestination
+    Properties:
+      Name: !Sub ${Prefix}-code-interpreter-logs
+      DeliveryDestinationType: CWL
+      DestinationResourceArn: !Sub arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:${CodeInterpreterLogGroup}
+  CodeInterpreterLogsSource:
+    Type: AWS::Logs::DeliverySource
+    Properties:
+      Name: !Sub ${Prefix}-code-interpreter-logs
+      ResourceArn: !Ref CodeInterpreterArn
+      LogType: APPLICATION_LOGS
+  CodeInterpreterLogsDelivery:
+    Type: AWS::Logs::Delivery
+    DependsOn: OrchestratorRuntimeTracesDelivery
+    Properties:
+      DeliverySourceName: !Ref CodeInterpreterLogsSource
+      DeliveryDestinationArn: !GetAtt CodeInterpreterLogsDestination.Arn
+  CodeInterpreterUsageSource:
+    Type: AWS::Logs::DeliverySource
+    Properties:
+      Name: !Sub ${Prefix}-code-interpreter-usage
+      ResourceArn: !Ref CodeInterpreterArn
+      LogType: USAGE_LOGS
+  CodeInterpreterUsageDelivery:
+    Type: AWS::Logs::Delivery
+    DependsOn: CodeInterpreterLogsDelivery
+    Properties:
+      DeliverySourceName: !Ref CodeInterpreterUsageSource
+      DeliveryDestinationArn: !GetAtt CodeInterpreterLogsDestination.Arn
+  CodeInterpreterTracesSource:
+    Type: AWS::Logs::DeliverySource
+    Properties:
+      Name: !Sub ${Prefix}-code-interpreter-traces
+      ResourceArn: !Ref CodeInterpreterArn
+      LogType: TRACES
+  CodeInterpreterTracesDelivery:
+    Type: AWS::Logs::Delivery
+    DependsOn: CodeInterpreterUsageDelivery
+    Properties:
+      DeliverySourceName: !Ref CodeInterpreterTracesSource
+      DeliveryDestinationArn: !GetAtt TracesDestination.Arn
+  # ------------------------------------------------------------------ gateway
+  GatewayLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub
+        - /aws/vendedlogs/bedrock-agentcore/${Id}
+        - Id: !Select [1, !Split ["/", !Ref GatewayArn]]
+      RetentionInDays: !Ref LogRetentionDays
+  GatewayLogsDestination:
+    Type: AWS::Logs::DeliveryDestination
+    Properties:
+      Name: !Sub ${Prefix}-gateway-logs
+      DeliveryDestinationType: CWL
+      DestinationResourceArn: !Sub arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:${GatewayLogGroup}
+  GatewayLogsSource:
+    Type: AWS::Logs::DeliverySource
+    Properties:
+      Name: !Sub ${Prefix}-gateway-logs
+      ResourceArn: !Ref GatewayArn
+      LogType: APPLICATION_LOGS
+  GatewayLogsDelivery:
+    Type: AWS::Logs::Delivery
+    DependsOn: CodeInterpreterTracesDelivery
+    Properties:
+      DeliverySourceName: !Ref GatewayLogsSource
+      DeliveryDestinationArn: !GetAtt GatewayLogsDestination.Arn
+  GatewayTracesSource:
+    Type: AWS::Logs::DeliverySource
+    Properties:
+      Name: !Sub ${Prefix}-gateway-traces
+      ResourceArn: !Ref GatewayArn
+      LogType: TRACES
+  GatewayTracesDelivery:
+    Type: AWS::Logs::Delivery
+    DependsOn: GatewayLogsDelivery
+    Properties:
+      DeliverySourceName: !Ref GatewayTracesSource
+      DeliveryDestinationArn: !GetAtt TracesDestination.Arn
+  # ------------------------------------------------------------------ memory
+  MemoryLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub
+        - /aws/vendedlogs/bedrock-agentcore/${Id}
+        - Id: !Select [1, !Split ["/", !Ref MemoryArn]]
+      RetentionInDays: !Ref LogRetentionDays
+  MemoryLogsDestination:
+    Type: AWS::Logs::DeliveryDestination
+    Properties:
+      Name: !Sub ${Prefix}-memory-logs
+      DeliveryDestinationType: CWL
+      DestinationResourceArn: !Sub arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:${MemoryLogGroup}
+  MemoryLogsSource:
+    Type: AWS::Logs::DeliverySource
+    Properties:
+      Name: !Sub ${Prefix}-memory-logs
+      ResourceArn: !Ref MemoryArn
+      LogType: APPLICATION_LOGS
+  MemoryLogsDelivery:
+    Type: AWS::Logs::Delivery
+    DependsOn: GatewayTracesDelivery
+    Properties:
+      DeliverySourceName: !Ref MemoryLogsSource
+      DeliveryDestinationArn: !GetAtt MemoryLogsDestination.Arn
+  MemoryTracesSource:
+    Type: AWS::Logs::DeliverySource
+    Properties:
+      Name: !Sub ${Prefix}-memory-traces
+      ResourceArn: !Ref MemoryArn
+      LogType: TRACES
+  MemoryTracesDelivery:
+    Type: AWS::Logs::Delivery
+    DependsOn: MemoryLogsDelivery
+    Properties:
+      DeliverySourceName: !Ref MemoryTracesSource
+      DeliveryDestinationArn: !GetAtt TracesDestination.Arn
+  # ------------------------------------------------------------------ identity (workload identities)
+  IdentityLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/vendedlogs/bedrock-agentcore/${Prefix}-identity
+      RetentionInDays: !Ref LogRetentionDays
+  IdentityLogsDestination:
+    Type: AWS::Logs::DeliveryDestination
+    Properties:
+      Name: !Sub ${Prefix}-identity-logs
+      DeliveryDestinationType: CWL
+      DestinationResourceArn: !Sub arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:${IdentityLogGroup}
+  QuantMcpIdentityLogsSource:
+    Type: AWS::Logs::DeliverySource
+    Properties:
+      Name: !Sub ${Prefix}-quant-mcp-identity-logs
+      ResourceArn: !Ref QuantMcpWorkloadIdentityArn
+      LogType: APPLICATION_LOGS
+  QuantMcpIdentityLogsDelivery:
+    Type: AWS::Logs::Delivery
+    DependsOn: MemoryTracesDelivery
+    Properties:
+      DeliverySourceName: !Ref QuantMcpIdentityLogsSource
+      DeliveryDestinationArn: !GetAtt IdentityLogsDestination.Arn
+  QuantMcpIdentityTracesSource:
+    Type: AWS::Logs::DeliverySource
+    Properties:
+      Name: !Sub ${Prefix}-quant-mcp-identity-traces
+      ResourceArn: !Ref QuantMcpWorkloadIdentityArn
+      LogType: TRACES
+  QuantMcpIdentityTracesDelivery:
+    Type: AWS::Logs::Delivery
+    DependsOn: QuantMcpIdentityLogsDelivery
+    Properties:
+      DeliverySourceName: !Ref QuantMcpIdentityTracesSource
+      DeliveryDestinationArn: !GetAtt TracesDestination.Arn
+  MarketAnalystIdentityLogsSource:
+    Type: AWS::Logs::DeliverySource
+    Properties:
+      Name: !Sub ${Prefix}-market-analyst-identity-logs
+      ResourceArn: !Ref MarketAnalystWorkloadIdentityArn
+      LogType: APPLICATION_LOGS
+  MarketAnalystIdentityLogsDelivery:
+    Type: AWS::Logs::Delivery
+    DependsOn: QuantMcpIdentityTracesDelivery
+    Properties:
+      DeliverySourceName: !Ref MarketAnalystIdentityLogsSource
+      DeliveryDestinationArn: !GetAtt IdentityLogsDestination.Arn
+  MarketAnalystIdentityTracesSource:
+    Type: AWS::Logs::DeliverySource
+    Properties:
+      Name: !Sub ${Prefix}-market-analyst-identity-traces
+      ResourceArn: !Ref MarketAnalystWorkloadIdentityArn
+      LogType: TRACES
+  MarketAnalystIdentityTracesDelivery:
+    Type: AWS::Logs::Delivery
+    DependsOn: MarketAnalystIdentityLogsDelivery
+    Properties:
+      DeliverySourceName: !Ref MarketAnalystIdentityTracesSource
+      DeliveryDestinationArn: !GetAtt TracesDestination.Arn
+  OrchestratorIdentityLogsSource:
+    Type: AWS::Logs::DeliverySource
+    Properties:
+      Name: !Sub ${Prefix}-orchestrator-identity-logs
+      ResourceArn: !Ref OrchestratorWorkloadIdentityArn
+      LogType: APPLICATION_LOGS
+  OrchestratorIdentityLogsDelivery:
+    Type: AWS::Logs::Delivery
+    DependsOn: MarketAnalystIdentityTracesDelivery
+    Properties:
+      DeliverySourceName: !Ref OrchestratorIdentityLogsSource
+      DeliveryDestinationArn: !GetAtt IdentityLogsDestination.Arn
+  OrchestratorIdentityTracesSource:
+    Type: AWS::Logs::DeliverySource
+    Properties:
+      Name: !Sub ${Prefix}-orchestrator-identity-traces
+      ResourceArn: !Ref OrchestratorWorkloadIdentityArn
+      LogType: TRACES
+  OrchestratorIdentityTracesDelivery:
+    Type: AWS::Logs::Delivery
+    DependsOn: OrchestratorIdentityLogsDelivery
+    Properties:
+      DeliverySourceName: !Ref OrchestratorIdentityTracesSource
+      DeliveryDestinationArn: !GetAtt TracesDestination.Arn
+  GatewayIdentityLogsSource:
+    Type: AWS::Logs::DeliverySource
+    Properties:
+      Name: !Sub ${Prefix}-gateway-identity-logs
+      ResourceArn: !Ref GatewayWorkloadIdentityArn
+      LogType: APPLICATION_LOGS
+  GatewayIdentityLogsDelivery:
+    Type: AWS::Logs::Delivery
+    DependsOn: OrchestratorIdentityTracesDelivery
+    Properties:
+      DeliverySourceName: !Ref GatewayIdentityLogsSource
+      DeliveryDestinationArn: !GetAtt IdentityLogsDestination.Arn
+  GatewayIdentityTracesSource:
+    Type: AWS::Logs::DeliverySource
+    Properties:
+      Name: !Sub ${Prefix}-gateway-identity-traces
+      ResourceArn: !Ref GatewayWorkloadIdentityArn
+      LogType: TRACES
+  GatewayIdentityTracesDelivery:
+    Type: AWS::Logs::Delivery
+    DependsOn: GatewayIdentityLogsDelivery
+    Properties:
+      DeliverySourceName: !Ref GatewayIdentityTracesSource
+      DeliveryDestinationArn: !GetAtt TracesDestination.Arn
+
+Outputs:
+  TracesDestinationArn:
+    Value: !GetAtt TracesDestination.Arn
+  DeliveryCount:
+    Value: "24"

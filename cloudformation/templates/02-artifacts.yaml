@@ -1,0 +1,70 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  Portfolio Advisory Copilot - build artifacts. ECR repositories for the three AgentCore Runtime containers
+  (built locally for linux/arm64 and pushed by you or the driver) and an S3 bucket for the Lambda packages.
+
+Parameters:
+  Prefix:
+    Type: String
+    AllowedPattern: "^[a-z][a-z0-9-]{2,40}$"
+  ImageRetentionCount:
+    Type: Number
+    Default: 10
+
+Resources:
+  QuantMcpRepo:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: !Sub ${Prefix}/quant-mcp
+      EmptyOnDelete: true
+      ImageScanningConfiguration: { ScanOnPush: true }
+      LifecyclePolicy:
+        LifecyclePolicyText: !Sub '{"rules":[{"rulePriority":1,"selection":{"tagStatus":"any","countType":"imageCountMoreThan","countNumber":${ImageRetentionCount}},"action":{"type":"expire"}}]}'
+      Tags: [{ Key: project, Value: !Ref Prefix }]
+  MarketAnalystRepo:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: !Sub ${Prefix}/market-analyst
+      EmptyOnDelete: true
+      ImageScanningConfiguration: { ScanOnPush: true }
+      LifecyclePolicy:
+        LifecyclePolicyText: !Sub '{"rules":[{"rulePriority":1,"selection":{"tagStatus":"any","countType":"imageCountMoreThan","countNumber":${ImageRetentionCount}},"action":{"type":"expire"}}]}'
+      Tags: [{ Key: project, Value: !Ref Prefix }]
+  OrchestratorRepo:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: !Sub ${Prefix}/orchestrator
+      EmptyOnDelete: true
+      ImageScanningConfiguration: { ScanOnPush: true }
+      LifecyclePolicy:
+        LifecyclePolicyText: !Sub '{"rules":[{"rulePriority":1,"selection":{"tagStatus":"any","countType":"imageCountMoreThan","countNumber":${ImageRetentionCount}},"action":{"type":"expire"}}]}'
+      Tags: [{ Key: project, Value: !Ref Prefix }]
+  LambdaArtifactBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub ${Prefix}-artifacts-${AWS::AccountId}-${AWS::Region}
+      OwnershipControls: { Rules: [{ ObjectOwnership: BucketOwnerEnforced }] }
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        IgnorePublicAcls: true
+        BlockPublicPolicy: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault: { SSEAlgorithm: AES256 }
+      LifecycleConfiguration:
+        Rules:
+          - Id: expire-old-packages
+            Status: Enabled
+            ExpirationInDays: 90
+      Tags: [{ Key: project, Value: !Ref Prefix }]
+
+Outputs:
+  QuantMcpRepositoryUri:
+    Value: !GetAtt QuantMcpRepo.RepositoryUri
+  MarketAnalystRepositoryUri:
+    Value: !GetAtt MarketAnalystRepo.RepositoryUri
+  OrchestratorRepositoryUri:
+    Value: !GetAtt OrchestratorRepo.RepositoryUri
+  LambdaArtifactBucketName:
+    Value: !Ref LambdaArtifactBucket

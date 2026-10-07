@@ -1,0 +1,18 @@
+{
+  "as_of": "2026-10-02",
+  "source": "synthetic POC reference data - not live market prices",
+  "instruments": [
+    {"ticker": "AAPL", "name": "Apple Inc.", "asset_class": "Equity", "sector": "Information Technology", "price": 225.00, "beta": 1.20, "dividend_yield": 0.0045, "esg_flags": []},
+    {"ticker": "MSFT", "name": "Microsoft Corp.", "asset_class": "Equity", "sector": "Information Technology", "price": 420.00, "beta": 0.95, "dividend_yield": 0.0072, "esg_flags": []},
+    {"ticker": "NVDA", "name": "NVIDIA Corp.", "asset_class": "Equity", "sector": "Information Technology", "price": 130.00, "beta": 1.70, "dividend_yield": 0.0003, "esg_flags": []},
+    {"ticker": "JNJ", "name": "Johnson & Johnson", "asset_class": "Equity", "sector": "Health Care", "price": 160.00, "beta": 0.55, "dividend_yield": 0.0310, "esg_flags": []},
+    {"ticker": "LMT", "name": "Lockheed Martin Corp.", "asset_class": "Equity", "sector": "Industrials", "price": 470.00, "beta": 0.45, "dividend_yield": 0.0270, "esg_flags": ["weapons"]},
+    {"ticker": "BTU", "name": "Peabody Energy Corp.", "asset_class": "Equity", "sector": "Energy", "price": 25.00, "beta": 1.10, "dividend_yield": 0.0120, "esg_flags": ["thermal_coal"]},
+    {"ticker": "MO", "name": "Altria Group Inc.", "asset_class": "Equity", "sector": "Consumer Staples", "price": 50.00, "beta": 0.60, "dividend_yield": 0.0790, "esg_flags": ["tobacco"]},
+    {"ticker": "VOO", "name": "Vanguard S&P 500 ETF", "asset_class": "Index ETF", "sector": "Diversified", "price": 508.00, "beta": 1.00, "dividend_yield": 0.0130, "esg_flags": []},
+    {"ticker": "ESGV", "name": "Vanguard ESG U.S. Stock ETF", "asset_class": "Index ETF", "sector": "Diversified", "price": 105.00, "beta": 1.02, "dividend_yield": 0.0110, "esg_flags": []},
+    {"ticker": "VXUS", "name": "Vanguard Total International Stock ETF", "asset_class": "Index ETF", "sector": "Diversified", "price": 62.00, "beta": 0.85, "dividend_yield": 0.0310, "esg_flags": []},
+    {"ticker": "BND", "name": "Vanguard Total Bond Market ETF", "asset_class": "Bond ETF", "sector": "Fixed Income", "price": 73.00, "beta": 0.05, "dividend_yield": 0.0360, "esg_flags": []},
+    {"ticker": "EAGG", "name": "iShares ESG Aware U.S. Aggregate Bond ETF", "asset_class": "Bond ETF", "sector": "Fixed Income", "price": 47.00, "beta": 0.05, "dividend_yield": 0.0350, "esg_flags": []}
+  ]
+}

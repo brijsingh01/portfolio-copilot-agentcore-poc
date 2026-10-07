@@ -1,0 +1,109 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  Portfolio Advisory Copilot - least-privilege deployer role for a person or a CI agent (e.g. Jenkins) to run
+  `python -m cloudformation.deploy up|smoke|down` and the end-to-end tests. Deploy once per account/region by an
+  administrator. Resources are scoped to the `portfolio-copilot` name prefix; the stacks themselves run under the
+  CloudFormation execution role (templates/00-execution-role.yaml), which this role creates and passes.
+
+Parameters:
+  RoleName:
+    Type: String
+    Default: portfolio-copilot-ci-deployer
+  TrustedPrincipalArn:
+    Type: String
+    AllowedPattern: "^arn:aws[a-z-]*:iam::[0-9]{12}:(user|role|root)(/.*)?$"
+    Description: IAM user or role allowed to assume this role (a person, or the Jenkins agent's instance/role)
+
+Resources:
+  CiDeployerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Ref RoleName
+      Description: Deploys and tests the Portfolio Copilot AgentCore POC
+      MaxSessionDuration: 7200       # a first deployment takes ~35 minutes; tests ~5 minutes
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { AWS: !Ref TrustedPrincipalArn }
+            Action: [sts:AssumeRole, sts:TagSession]
+      Policies:
+        - PolicyName: deploy-portfolio-copilot
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              # ---------------------------------------------------------------- CloudFormation
+              - Sid: Stacks
+                Effect: Allow
+                Action: [cloudformation:CreateStack, cloudformation:UpdateStack, cloudformation:DeleteStack,
+                         cloudformation:DescribeStacks, cloudformation:DescribeStackEvents,
+                         cloudformation:DescribeStackResources, cloudformation:ListStackResources,
+                         cloudformation:GetTemplate, cloudformation:TagResource, cloudformation:UntagResource]
+                Resource: !Sub arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/portfolio-copilot-*/*
+              - Sid: StackReads
+                Effect: Allow
+                Action: [cloudformation:ValidateTemplate, cloudformation:ListStacks]
+                Resource: "*"
+              # 00-execution-role is created by this role directly (no service role yet); every other stack runs
+              # under that execution role, which is passed to CloudFormation only.
+              - Sid: ExecutionRole
+                Effect: Allow
+                Action: [iam:CreateRole, iam:DeleteRole, iam:GetRole, iam:UpdateRole, iam:UpdateAssumeRolePolicy,
+                         iam:PutRolePolicy, iam:GetRolePolicy, iam:DeleteRolePolicy, iam:ListRolePolicies,
+                         iam:ListAttachedRolePolicies, iam:TagRole, iam:UntagRole]
+                Resource: !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/portfolio-copilot-cfn-execution
+              - Sid: PassExecutionRole
+                Effect: Allow
+                Action: iam:PassRole
+                Resource: !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/portfolio-copilot-cfn-execution
+                Condition: { StringEquals: { iam:PassedToService: cloudformation.amazonaws.com } }
+              # ---------------------------------------------------------------- driver: images, Lambda code, data
+              - Sid: EcrAuth
+                Effect: Allow
+                Action: ecr:GetAuthorizationToken
+                Resource: "*"
+              - Sid: EcrPush
+                Effect: Allow
+                Action: [ecr:DescribeImages, ecr:ListImages, ecr:BatchCheckLayerAvailability, ecr:BatchGetImage,
+                         ecr:GetDownloadUrlForLayer, ecr:InitiateLayerUpload, ecr:UploadLayerPart,
+                         ecr:CompleteLayerUpload, ecr:PutImage]
+                Resource: !Sub arn:${AWS::Partition}:ecr:${AWS::Region}:${AWS::AccountId}:repository/portfolio-copilot-*
+              - Sid: Buckets
+                Effect: Allow
+                Action: [s3:PutObject, s3:GetObject, s3:DeleteObject, s3:DeleteObjectVersion, s3:ListBucket,
+                         s3:ListBucketVersions]
+                Resource: ["arn:aws:s3:::portfolio-copilot-*", "arn:aws:s3:::portfolio-copilot-*/*"]
+              - Sid: SeedTable
+                Effect: Allow
+                Action: [dynamodb:BatchWriteItem, dynamodb:PutItem, dynamodb:DescribeTable]
+                Resource: !Sub arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/portfolio-copilot-*
+              - Sid: KnowledgeBaseIngestion
+                Effect: Allow
+                Action: [bedrock:StartIngestionJob, bedrock:GetIngestionJob]
+                Resource: !Sub arn:${AWS::Partition}:bedrock:${AWS::Region}:${AWS::AccountId}:knowledge-base/*
+              - Sid: AdotLayerLookup
+                Effect: Allow
+                Action: lambda:GetLayerVersion
+                Resource: !Sub arn:${AWS::Partition}:lambda:${AWS::Region}:615299751070:layer:AWSOpenTelemetryDistroPython:*
+              - Sid: ResourceLookups       # workload identity ARNs for telemetry, Transaction Search, subnet checks
+                Effect: Allow
+                Action: [bedrock-agentcore:GetAgentRuntime, bedrock-agentcore:GetGateway,
+                         xray:GetTraceSegmentDestination, ec2:DescribeSubnets]
+                Resource: "*"
+              # ---------------------------------------------------------------- end-to-end tests (read-only checks)
+              - Sid: E2EReads
+                Effect: Allow
+                Action: [bedrock-agentcore:GetCodeInterpreter, bedrock-agentcore:GetMemory,
+                         bedrock-agentcore:ListEvents, bedrock-agentcore:RetrieveMemoryRecords,
+                         bedrock:GetPrompt, bedrock:GetGuardrail,
+                         lambda:GetFunctionConfiguration,
+                         ec2:DescribeSecurityGroups, ec2:DescribeRouteTables,
+                         logs:StartQuery, logs:GetQueryResults, logs:DescribeDeliverySources,
+                         tag:GetResources]
+                Resource: "*"
+      Tags:
+        - { Key: project, Value: portfolio-copilot }
+
+Outputs:
+  RoleArn:
+    Value: !GetAtt CiDeployerRole.Arn

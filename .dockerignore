@@ -1,0 +1,13 @@
+# The images need only src/, requirements.txt and data/market_reference.json (see docker/Dockerfile)
+**/__pycache__
+**/*.pyc
+.git
+.pytest_cache
+cloudformation
+config
+docs
+scripts
+tests
+*.md
+data/seed_portfolios.json
+data/investment_policy.md

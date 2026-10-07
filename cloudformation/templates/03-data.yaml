@@ -1,0 +1,227 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  Portfolio Advisory Copilot - data plane. ClientPortfolios DynamoDB table, policy-document bucket, the
+  supplemental (multimodal) bucket Nova embeddings require, S3 Vectors bucket + index, and a Bedrock
+  Knowledge Base (Amazon Nova Multimodal Embeddings) with an S3 data source.
+  Post-deploy (not expressible in CloudFormation): seed the table, upload documents, start an ingestion job.
+
+Parameters:
+  Prefix:
+    Type: String
+    AllowedPattern: "^[a-z][a-z0-9-]{2,40}$"
+  EmbeddingModelId:
+    Type: String
+    Default: amazon.nova-2-multimodal-embeddings-v1:0
+  EmbeddingDimensions:
+    Type: Number
+    Default: 1024
+    AllowedValues: [256, 384, 1024, 3072]
+  DocumentPrefix:
+    Type: String
+    Default: policies/
+  ChunkMaxTokens:
+    Type: Number
+    Default: 300
+  ChunkOverlapPercentage:
+    Type: Number
+    Default: 15
+
+Resources:
+  # ------------------------------------------------------------------ DynamoDB
+  PortfolioTable:
+    Type: AWS::DynamoDB::Table
+    UpdateReplacePolicy: Retain
+    DeletionPolicy: Delete
+    Properties:
+      TableName: !Sub ${Prefix}-ClientPortfolios
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - { AttributeName: client_id, AttributeType: S }
+      KeySchema:
+        - { AttributeName: client_id, KeyType: HASH }
+      SSESpecification: { SSEEnabled: true, SSEType: KMS }
+      PointInTimeRecoverySpecification: { PointInTimeRecoveryEnabled: true }
+      Tags: [{ Key: project, Value: !Ref Prefix }]
+
+  # ------------------------------------------------------------------ S3 buckets
+  DocumentBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub ${Prefix}-kb-${AWS::AccountId}-${AWS::Region}
+      OwnershipControls: { Rules: [{ ObjectOwnership: BucketOwnerEnforced }] }
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        IgnorePublicAcls: true
+        BlockPublicPolicy: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault: { SSEAlgorithm: AES256 }
+            BucketKeyEnabled: true
+      VersioningConfiguration: { Status: Enabled }
+      Tags: [{ Key: project, Value: !Ref Prefix }]
+
+  MediaBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub ${Prefix}-kb-media-${AWS::AccountId}-${AWS::Region}
+      OwnershipControls: { Rules: [{ ObjectOwnership: BucketOwnerEnforced }] }
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        IgnorePublicAcls: true
+        BlockPublicPolicy: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault: { SSEAlgorithm: AES256 }
+            BucketKeyEnabled: true
+      VersioningConfiguration: { Status: Enabled }
+      Tags: [{ Key: project, Value: !Ref Prefix }]
+
+  DocumentBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref DocumentBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: "*"
+            Action: s3:*
+            Resource: [!GetAtt DocumentBucket.Arn, !Sub "${DocumentBucket.Arn}/*"]
+            Condition: { Bool: { aws:SecureTransport: "false" } }
+
+  MediaBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref MediaBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: "*"
+            Action: s3:*
+            Resource: [!GetAtt MediaBucket.Arn, !Sub "${MediaBucket.Arn}/*"]
+            Condition: { Bool: { aws:SecureTransport: "false" } }
+
+  # ------------------------------------------------------------------ S3 Vectors
+  VectorBucket:
+    Type: AWS::S3Vectors::VectorBucket
+    Properties:
+      VectorBucketName: !Sub ${Prefix}-vectors-${AWS::AccountId}
+      EncryptionConfiguration: { SseType: AES256 }
+
+  VectorIndex:
+    Type: AWS::S3Vectors::Index
+    DependsOn: VectorBucket
+    Properties:
+      VectorBucketName: !Sub ${Prefix}-vectors-${AWS::AccountId}
+      IndexName: investment-policy
+      DataType: float32
+      Dimension: !Ref EmbeddingDimensions
+      DistanceMetric: cosine
+      MetadataConfiguration:
+        # Bedrock KB stores chunk text/metadata here; they exceed filterable-metadata size limits.
+        NonFilterableMetadataKeys: [AMAZON_BEDROCK_TEXT, AMAZON_BEDROCK_METADATA]
+
+  # ------------------------------------------------------------------ Knowledge Base
+  KnowledgeBaseRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${Prefix}-kb-role
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: bedrock.amazonaws.com }
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals: { aws:SourceAccount: !Ref AWS::AccountId }
+              ArnLike: { aws:SourceArn: !Sub "arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:knowledge-base/*" }
+      Policies:
+        - PolicyName: kb-access
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: Embeddings
+                Effect: Allow
+                Action: bedrock:InvokeModel
+                Resource: !Sub arn:aws:bedrock:${AWS::Region}::foundation-model/${EmbeddingModelId}
+              - Sid: SourceDocs
+                Effect: Allow
+                Action: [s3:GetObject, s3:ListBucket]
+                Resource: [!GetAtt DocumentBucket.Arn, !Sub "${DocumentBucket.Arn}/*"]
+                Condition: { StringEquals: { aws:ResourceAccount: !Ref AWS::AccountId } }
+              - Sid: SupplementalStorage
+                Effect: Allow
+                Action: [s3:GetObject, s3:PutObject, s3:DeleteObject, s3:ListBucket]
+                Resource: [!GetAtt MediaBucket.Arn, !Sub "${MediaBucket.Arn}/*"]
+                Condition: { StringEquals: { aws:ResourceAccount: !Ref AWS::AccountId } }
+              - Sid: VectorIndex
+                Effect: Allow
+                Action: [s3vectors:PutVectors, s3vectors:GetVectors, s3vectors:DeleteVectors, s3vectors:QueryVectors, s3vectors:GetIndex]
+                Resource: !GetAtt VectorIndex.IndexArn
+      Tags: [{ Key: project, Value: !Ref Prefix }]
+
+  KnowledgeBase:
+    Type: AWS::Bedrock::KnowledgeBase
+    Properties:
+      Name: !Sub ${Prefix}-policies
+      Description: Apex Wealth investment & ESG policy statements
+      RoleArn: !GetAtt KnowledgeBaseRole.Arn
+      KnowledgeBaseConfiguration:
+        Type: VECTOR
+        VectorKnowledgeBaseConfiguration:
+          EmbeddingModelArn: !Sub arn:aws:bedrock:${AWS::Region}::foundation-model/${EmbeddingModelId}
+          EmbeddingModelConfiguration:
+            BedrockEmbeddingModelConfiguration:
+              Dimensions: !Ref EmbeddingDimensions
+              EmbeddingDataType: FLOAT32
+          # Nova multimodal embeddings require a supplemental storage bucket root (no prefix allowed).
+          SupplementalDataStorageConfiguration:
+            SupplementalDataStorageLocations:
+              - SupplementalDataStorageLocationType: S3
+                S3Location: { URI: !Sub "s3://${MediaBucket}" }
+      StorageConfiguration:
+        Type: S3_VECTORS
+        S3VectorsConfiguration:
+          IndexArn: !GetAtt VectorIndex.IndexArn
+      Tags: { project: !Ref Prefix }
+
+  PolicyDataSource:
+    Type: AWS::Bedrock::DataSource
+    Properties:
+      KnowledgeBaseId: !Ref KnowledgeBase
+      Name: policy-docs
+      DataDeletionPolicy: DELETE
+      DataSourceConfiguration:
+        Type: S3
+        S3Configuration:
+          BucketArn: !GetAtt DocumentBucket.Arn
+          InclusionPrefixes: [!Ref DocumentPrefix]
+      VectorIngestionConfiguration:
+        ChunkingConfiguration:
+          ChunkingStrategy: FIXED_SIZE
+          FixedSizeChunkingConfiguration:
+            MaxTokens: !Ref ChunkMaxTokens
+            OverlapPercentage: !Ref ChunkOverlapPercentage
+
+Outputs:
+  PortfolioTableName:
+    Value: !Ref PortfolioTable
+  PortfolioTableArn:
+    Value: !GetAtt PortfolioTable.Arn
+  DocumentBucketName:
+    Value: !Ref DocumentBucket
+  DocumentPrefix:
+    Value: !Ref DocumentPrefix
+  VectorIndexArn:
+    Value: !GetAtt VectorIndex.IndexArn
+  KnowledgeBaseId:
+    Value: !Ref KnowledgeBase
+  KnowledgeBaseArn:
+    Value: !GetAtt KnowledgeBase.KnowledgeBaseArn
+  DataSourceId:
+    Value: !GetAtt PolicyDataSource.DataSourceId

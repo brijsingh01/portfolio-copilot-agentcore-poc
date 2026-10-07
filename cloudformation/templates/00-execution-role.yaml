@@ -1,0 +1,189 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  Portfolio Advisory Copilot - CloudFormation service (execution) role. Deploy once per account/region with an
+  IAM-capable principal; every other stack is created with `--role-arn` pointing at this role so deployers only
+  need cloudformation:* + iam:PassRole. Permissions are scoped to resources named with the project prefix.
+
+Parameters:
+  ProjectPrefix:
+    Type: String
+    Default: portfolio-copilot
+    AllowedPattern: "^[a-z][a-z0-9-]{2,30}$"
+    Description: Name prefix shared by every environment of this project (resources are <prefix>-<env>-*).
+  RoleName:
+    Type: String
+    Default: portfolio-copilot-cfn-execution
+
+Resources:
+  ExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Ref RoleName
+      Description: CloudFormation execution role for Portfolio Copilot stacks
+      MaxSessionDuration: 3600
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: cloudformation.amazonaws.com }
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals: { aws:SourceAccount: !Ref AWS::AccountId }
+      Policies:
+        - PolicyName: provision
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: ProjectRoles
+                Effect: Allow
+                Action:
+                  - iam:CreateRole
+                  - iam:DeleteRole
+                  - iam:GetRole
+                  - iam:UpdateRole
+                  - iam:UpdateAssumeRolePolicy
+                  - iam:PutRolePolicy
+                  - iam:GetRolePolicy
+                  - iam:DeleteRolePolicy
+                  - iam:ListRolePolicies
+                  - iam:ListAttachedRolePolicies
+                  - iam:TagRole
+                  - iam:UntagRole
+                  - iam:PassRole
+                Resource: !Sub arn:aws:iam::${AWS::AccountId}:role/${ProjectPrefix}-*
+              - Sid: ServiceLinkedRoles
+                Effect: Allow
+                Action: iam:CreateServiceLinkedRole
+                Resource: "*"
+                Condition:
+                  StringEquals:
+                    iam:AWSServiceName:
+                      - network.bedrock-agentcore.amazonaws.com
+                      - runtime-identity.bedrock-agentcore.amazonaws.com
+              - Sid: Lambda
+                Effect: Allow
+                Action: lambda:*
+                Resource: !Sub arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${ProjectPrefix}-*
+              - Sid: LambdaLayersAndCode
+                Effect: Allow
+                Action: [lambda:GetLayerVersion, s3:GetObject, s3:GetObjectVersion]
+                Resource:
+                  - !Sub arn:aws:lambda:${AWS::Region}:615299751070:layer:AWSOpenTelemetryDistroPython:*
+                  - !Sub arn:aws:s3:::${ProjectPrefix}-*/*
+              - Sid: DynamoDB
+                Effect: Allow
+                Action: dynamodb:*
+                Resource: !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${ProjectPrefix}-*
+              - Sid: S3
+                Effect: Allow
+                Action: s3:*
+                Resource:
+                  - !Sub arn:aws:s3:::${ProjectPrefix}-*
+                  - !Sub arn:aws:s3:::${ProjectPrefix}-*/*
+              - Sid: S3Vectors
+                Effect: Allow
+                Action: s3vectors:*
+                Resource: !Sub arn:aws:s3vectors:${AWS::Region}:${AWS::AccountId}:bucket/${ProjectPrefix}-*
+              - Sid: Ecr
+                Effect: Allow
+                Action: ecr:*
+                Resource: !Sub arn:aws:ecr:${AWS::Region}:${AWS::AccountId}:repository/${ProjectPrefix}-*
+              - Sid: Logs
+                Effect: Allow
+                Action: logs:*
+                Resource:
+                  - !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${ProjectPrefix}-*
+                  - !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/bedrock-agentcore/*
+                  - !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/vendedlogs/bedrock-agentcore/*
+              - Sid: AgentCoreLogDelivery          # 09-telemetry: vended logs + service traces
+                Effect: Allow
+                Action:
+                  - logs:PutDeliverySource
+                  - logs:GetDeliverySource
+                  - logs:DeleteDeliverySource
+                  - logs:PutDeliveryDestination
+                  - logs:GetDeliveryDestination
+                  - logs:DeleteDeliveryDestination
+                  - logs:PutDeliveryDestinationPolicy
+                  - logs:GetDeliveryDestinationPolicy
+                  - logs:DeleteDeliveryDestinationPolicy
+                  - logs:CreateDelivery
+                  - logs:GetDelivery
+                  - logs:DeleteDelivery
+                  - logs:UpdateDeliveryConfiguration
+                  - logs:TagResource
+                  - logs:UntagResource
+                  - logs:ListTagsForResource
+                Resource:
+                  - !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:delivery-source:${ProjectPrefix}-*
+                  - !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:delivery-destination:${ProjectPrefix}-*
+                  - !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:delivery:*
+              - Sid: AgentCoreLogDeliveryAccount
+                Effect: Allow
+                Action:
+                  - logs:DescribeDeliverySources
+                  - logs:DescribeDeliveryDestinations
+                  - logs:DescribeDeliveries
+                  - xray:PutResourcePolicy           # CreateDelivery to an XRAY destination grants
+                  - xray:ListResourcePolicies        # delivery.logs.amazonaws.com xray:PutTraceSegments
+                  - xray:DeleteResourcePolicy
+                Resource: "*"
+              - Sid: AccountScopedReadsAndSingletons
+                Effect: Allow
+                Action:
+                  - bedrock:CreateGuardrail
+                  - bedrock:CreateGuardrailVersion
+                  - bedrock:GetGuardrail
+                  - bedrock:UpdateGuardrail
+                  - bedrock:DeleteGuardrail
+                  - bedrock:ListGuardrails
+                  - bedrock:CreatePrompt             # Prompt Management (system prompts, pinned versions)
+                  - bedrock:CreatePromptVersion
+                  - bedrock:GetPrompt
+                  - bedrock:UpdatePrompt
+                  - bedrock:DeletePrompt
+                  - bedrock:ListPrompts
+                  - bedrock:CreateKnowledgeBase
+                  - bedrock:GetKnowledgeBase
+                  - bedrock:UpdateKnowledgeBase
+                  - bedrock:DeleteKnowledgeBase
+                  - bedrock:ListKnowledgeBases
+                  - bedrock:CreateDataSource
+                  - bedrock:GetDataSource
+                  - bedrock:UpdateDataSource
+                  - bedrock:DeleteDataSource
+                  - bedrock:ListDataSources
+                  - bedrock:TagResource
+                  - bedrock:UntagResource
+                  - bedrock:ListTagsForResource
+                  - bedrock-agentcore:*
+                  - ecr:GetAuthorizationToken
+                  - logs:DescribeLogGroups
+                  - logs:PutResourcePolicy
+                  - logs:DeleteResourcePolicy
+                  - logs:DescribeResourcePolicies
+                  - xray:GetTraceSegmentDestination
+                  - xray:UpdateTraceSegmentDestination
+                  - xray:GetIndexingRules
+                  - xray:UpdateIndexingRule
+                  - application-signals:StartDiscovery
+                Resource: "*"
+              - Sid: SecurityGroup               # 01-security-group.yaml; Describe* also validates the VPC/subnets
+                Effect: Allow
+                Action:
+                  - ec2:Describe*
+                  - ec2:CreateSecurityGroup
+                  - ec2:DeleteSecurityGroup
+                  - ec2:AuthorizeSecurityGroupEgress
+                  - ec2:RevokeSecurityGroupEgress
+                  - ec2:CreateTags
+                  - ec2:DeleteTags
+                Resource: "*"
+              - Sid: EmbeddingModelValidation
+                Effect: Allow
+                Action: bedrock:GetFoundationModel
+                Resource: "*"
+
+Outputs:
+  ExecutionRoleArn:
+    Value: !GetAtt ExecutionRole.Arn

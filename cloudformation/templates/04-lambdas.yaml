@@ -1,0 +1,347 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  Portfolio Advisory Copilot - AgentCore Gateway Lambda targets: 1 policy-kb (Bedrock KB retrieval),
+  2 portfolio-db (DynamoDB lookup), 3 compliance-rules (deterministic IPS rules engine), 4 portfolio-analytics
+  (fixed analytics program on a custom AgentCore Code Interpreter, created here in VPC mode). arm64 / Python 3.12
+  in the private subnets, ADOT layer, X-Ray active tracing. The tools are identity-agnostic and reusable: the
+  Gateway's JWT authorizer is the auth boundary (no token handling here).
+
+Parameters:
+  Prefix:
+    Type: String
+    AllowedPattern: "^[a-z][a-z0-9-]{2,40}$"
+  PrivateSubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+  SecurityGroupId:
+    Type: AWS::EC2::SecurityGroup::Id
+  ArtifactBucket:
+    Type: String
+  KbCodeKey:
+    Type: String
+  DdbCodeKey:
+    Type: String
+  ComplianceCodeKey:
+    Type: String
+  AnalyticsCodeKey:
+    Type: String
+  RuntimeNamePrefix:
+    Type: String
+    AllowedPattern: "^[a-zA-Z][a-zA-Z0-9_]{0,30}$"
+    Description: Code interpreter names allow only letters, digits and underscores.
+  AdotLayerArn:
+    Type: String
+    Default: arn:aws:lambda:us-east-1:615299751070:layer:AWSOpenTelemetryDistroPython:32
+    Description: AWS Distro for OpenTelemetry Python layer for this region. Empty string disables it.
+  # ---- data
+  PortfolioTableName:
+    Type: String
+  PortfolioTableArn:
+    Type: String
+  KnowledgeBaseId:
+    Type: String
+  KnowledgeBaseArn:
+    Type: String
+  LogRetentionDays:
+    Type: Number
+    Default: 30
+
+Conditions:
+  UseAdot: !Not [!Equals [!Ref AdotLayerArn, ""]]
+
+Resources:
+  KbLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${Prefix}-kb-retrieval
+      RetentionInDays: !Ref LogRetentionDays
+  DdbLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${Prefix}-ddb-portfolio
+      RetentionInDays: !Ref LogRetentionDays
+  ComplianceLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${Prefix}-compliance-rules
+      RetentionInDays: !Ref LogRetentionDays
+
+  AnalyticsLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${Prefix}-portfolio-analytics
+      RetentionInDays: !Ref LogRetentionDays
+
+  # ------------------------------------------------------------------ code interpreter (VPC mode) behind target 4
+  CodeInterpreter:
+    Type: AWS::BedrockAgentCore::CodeInterpreterCustom
+    Properties:
+      Name: !Sub ${RuntimeNamePrefix}_analytics
+      Description: Sandboxed Python for portfolio concentration and risk analytics (private subnets, no inbound)
+      NetworkConfiguration:
+        NetworkMode: VPC
+        VpcConfig:
+          Subnets: !Ref PrivateSubnetIds
+          SecurityGroups: [!Ref SecurityGroupId]
+      Tags: { project: !Ref Prefix }
+
+  KbRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${Prefix}-kb-retrieval-role
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+            Condition: { StringEquals: { aws:SourceAccount: !Ref AWS::AccountId } }
+      Policies:
+        - PolicyName: function
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: Logs
+                Effect: Allow
+                Action: [logs:CreateLogStream, logs:PutLogEvents]
+                Resource: !Sub "${KbLogGroup.Arn}"
+              - Sid: Tracing
+                Effect: Allow
+                Action: [xray:PutTraceSegments, xray:PutTelemetryRecords]
+                Resource: "*"
+              - Sid: VpcNetworking
+                Effect: Allow
+                Action: [ec2:CreateNetworkInterface, ec2:DescribeNetworkInterfaces, ec2:DescribeSubnets,
+                         ec2:DeleteNetworkInterface, ec2:AssignPrivateIpAddresses, ec2:UnassignPrivateIpAddresses]
+                Resource: "*"
+              - Sid: RetrievePolicies
+                Effect: Allow
+                Action: bedrock:Retrieve
+                Resource: !Ref KnowledgeBaseArn
+
+  DdbRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${Prefix}-ddb-portfolio-role
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+            Condition: { StringEquals: { aws:SourceAccount: !Ref AWS::AccountId } }
+      Policies:
+        - PolicyName: function
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: Logs
+                Effect: Allow
+                Action: [logs:CreateLogStream, logs:PutLogEvents]
+                Resource: !Sub "${DdbLogGroup.Arn}"
+              - Sid: Tracing
+                Effect: Allow
+                Action: [xray:PutTraceSegments, xray:PutTelemetryRecords]
+                Resource: "*"
+              - Sid: VpcNetworking
+                Effect: Allow
+                Action: [ec2:CreateNetworkInterface, ec2:DescribeNetworkInterfaces, ec2:DescribeSubnets,
+                         ec2:DeleteNetworkInterface, ec2:AssignPrivateIpAddresses, ec2:UnassignPrivateIpAddresses]
+                Resource: "*"
+              - Sid: ReadPortfolios
+                Effect: Allow
+                Action: dynamodb:GetItem
+                Resource: !Ref PortfolioTableArn
+
+  ComplianceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${Prefix}-compliance-rules-role
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+            Condition: { StringEquals: { aws:SourceAccount: !Ref AWS::AccountId } }
+      Policies:
+        - PolicyName: function
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: Logs
+                Effect: Allow
+                Action: [logs:CreateLogStream, logs:PutLogEvents]
+                Resource: !Sub "${ComplianceLogGroup.Arn}"
+              - Sid: Tracing
+                Effect: Allow
+                Action: [xray:PutTraceSegments, xray:PutTelemetryRecords]
+                Resource: "*"
+              - Sid: VpcNetworking
+                Effect: Allow
+                Action: [ec2:CreateNetworkInterface, ec2:DescribeNetworkInterfaces, ec2:DescribeSubnets,
+                         ec2:DeleteNetworkInterface, ec2:AssignPrivateIpAddresses, ec2:UnassignPrivateIpAddresses]
+                Resource: "*"
+
+  AnalyticsRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${Prefix}-portfolio-analytics-role
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+            Condition: { StringEquals: { aws:SourceAccount: !Ref AWS::AccountId } }
+      Policies:
+        - PolicyName: function
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: Logs
+                Effect: Allow
+                Action: [logs:CreateLogStream, logs:PutLogEvents]
+                Resource: !Sub "${AnalyticsLogGroup.Arn}"
+              - Sid: Tracing
+                Effect: Allow
+                Action: [xray:PutTraceSegments, xray:PutTelemetryRecords]
+                Resource: "*"
+              - Sid: VpcNetworking
+                Effect: Allow
+                Action: [ec2:CreateNetworkInterface, ec2:DescribeNetworkInterfaces, ec2:DescribeSubnets,
+                         ec2:DeleteNetworkInterface, ec2:AssignPrivateIpAddresses, ec2:UnassignPrivateIpAddresses]
+                Resource: "*"
+              - Sid: CodeInterpreterSessions
+                Effect: Allow
+                Action: [bedrock-agentcore:StartCodeInterpreterSession, bedrock-agentcore:InvokeCodeInterpreter,
+                         bedrock-agentcore:StopCodeInterpreterSession, bedrock-agentcore:GetCodeInterpreterSession]
+                Resource: !GetAtt CodeInterpreter.CodeInterpreterArn
+
+  KbFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub ${Prefix}-kb-retrieval
+      Description: Gateway target policy-kb - Bedrock Knowledge Base (S3 Vectors) policy retrieval
+      Runtime: python3.12
+      Architectures: [arm64]
+      Handler: src.lambdas.kb_retrieval.handler.handler
+      Role: !GetAtt KbRole.Arn
+      Code: { S3Bucket: !Ref ArtifactBucket, S3Key: !Ref KbCodeKey }
+      MemorySize: 512
+      Timeout: 20
+      TracingConfig: { Mode: Active }
+      LoggingConfig: { LogFormat: Text, LogGroup: !Ref KbLogGroup }
+      Layers: !If [UseAdot, [!Ref AdotLayerArn], !Ref AWS::NoValue]
+      VpcConfig:
+        SubnetIds: !Ref PrivateSubnetIds
+        SecurityGroupIds: [!Ref SecurityGroupId]
+      Environment:
+        Variables:
+          KNOWLEDGE_BASE_ID: !Ref KnowledgeBaseId
+          OTEL_SERVICE_NAME: !Sub ${Prefix}-kb-retrieval
+          OTEL_PROPAGATORS: tracecontext,baggage,xray
+          LOG_LEVEL: INFO
+          AWS_LAMBDA_EXEC_WRAPPER: !If [UseAdot, /opt/otel-instrument, !Ref AWS::NoValue]
+      Tags: [{ Key: project, Value: !Ref Prefix }]
+
+  DdbFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub ${Prefix}-ddb-portfolio
+      Description: Gateway target portfolio-db - ClientPortfolios lookups
+      Runtime: python3.12
+      Architectures: [arm64]
+      Handler: src.lambdas.ddb_portfolio.handler.handler
+      Role: !GetAtt DdbRole.Arn
+      Code: { S3Bucket: !Ref ArtifactBucket, S3Key: !Ref DdbCodeKey }
+      MemorySize: 512
+      Timeout: 20
+      TracingConfig: { Mode: Active }
+      LoggingConfig: { LogFormat: Text, LogGroup: !Ref DdbLogGroup }
+      Layers: !If [UseAdot, [!Ref AdotLayerArn], !Ref AWS::NoValue]
+      VpcConfig:
+        SubnetIds: !Ref PrivateSubnetIds
+        SecurityGroupIds: [!Ref SecurityGroupId]
+      Environment:
+        Variables:
+          PORTFOLIO_TABLE: !Ref PortfolioTableName
+          OTEL_SERVICE_NAME: !Sub ${Prefix}-ddb-portfolio
+          OTEL_PROPAGATORS: tracecontext,baggage,xray
+          LOG_LEVEL: INFO
+          AWS_LAMBDA_EXEC_WRAPPER: !If [UseAdot, /opt/otel-instrument, !Ref AWS::NoValue]
+      Tags: [{ Key: project, Value: !Ref Prefix }]
+
+  ComplianceFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub ${Prefix}-compliance-rules
+      Description: Gateway target compliance-rules - deterministic IPS allocation, concentration and ESG rules
+      Runtime: python3.12
+      Architectures: [arm64]
+      Handler: src.lambdas.compliance_rules.handler.handler
+      Role: !GetAtt ComplianceRole.Arn
+      Code: { S3Bucket: !Ref ArtifactBucket, S3Key: !Ref ComplianceCodeKey }
+      MemorySize: 512
+      Timeout: 20
+      TracingConfig: { Mode: Active }
+      LoggingConfig: { LogFormat: Text, LogGroup: !Ref ComplianceLogGroup }
+      Layers: !If [UseAdot, [!Ref AdotLayerArn], !Ref AWS::NoValue]
+      VpcConfig:
+        SubnetIds: !Ref PrivateSubnetIds
+        SecurityGroupIds: [!Ref SecurityGroupId]
+      Environment:
+        Variables:
+          OTEL_SERVICE_NAME: !Sub ${Prefix}-compliance-rules
+          OTEL_PROPAGATORS: tracecontext,baggage,xray
+          LOG_LEVEL: INFO
+          AWS_LAMBDA_EXEC_WRAPPER: !If [UseAdot, /opt/otel-instrument, !Ref AWS::NoValue]
+      Tags: [{ Key: project, Value: !Ref Prefix }]
+
+  AnalyticsFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub ${Prefix}-portfolio-analytics
+      Description: Gateway target portfolio-analytics - fixed analytics program on the VPC Code Interpreter
+      Runtime: python3.12
+      Architectures: [arm64]
+      Handler: src.lambdas.portfolio_analytics.handler.handler
+      Role: !GetAtt AnalyticsRole.Arn
+      Code: { S3Bucket: !Ref ArtifactBucket, S3Key: !Ref AnalyticsCodeKey }
+      MemorySize: 512
+      Timeout: 120              # session start + execute + stop; cold sessions take a few seconds
+      TracingConfig: { Mode: Active }
+      LoggingConfig: { LogFormat: Text, LogGroup: !Ref AnalyticsLogGroup }
+      Layers: !If [UseAdot, [!Ref AdotLayerArn], !Ref AWS::NoValue]
+      VpcConfig:
+        SubnetIds: !Ref PrivateSubnetIds
+        SecurityGroupIds: [!Ref SecurityGroupId]
+      Environment:
+        Variables:
+          CODE_INTERPRETER_ID: !GetAtt CodeInterpreter.CodeInterpreterId
+          OTEL_SERVICE_NAME: !Sub ${Prefix}-portfolio-analytics
+          OTEL_PROPAGATORS: tracecontext,baggage,xray
+          LOG_LEVEL: INFO
+          AWS_LAMBDA_EXEC_WRAPPER: !If [UseAdot, /opt/otel-instrument, !Ref AWS::NoValue]
+      Tags: [{ Key: project, Value: !Ref Prefix }]
+
+Outputs:
+  KbFunctionArn:
+    Value: !GetAtt KbFunction.Arn
+  KbFunctionName:
+    Value: !Ref KbFunction
+  DdbFunctionArn:
+    Value: !GetAtt DdbFunction.Arn
+  DdbFunctionName:
+    Value: !Ref DdbFunction
+  ComplianceFunctionArn:
+    Value: !GetAtt ComplianceFunction.Arn
+  ComplianceFunctionName:
+    Value: !Ref ComplianceFunction
+  AnalyticsFunctionArn:
+    Value: !GetAtt AnalyticsFunction.Arn
+  AnalyticsFunctionName:
+    Value: !Ref AnalyticsFunction
+  CodeInterpreterId:
+    Value: !GetAtt CodeInterpreter.CodeInterpreterId
+  CodeInterpreterArn:
+    Value: !GetAtt CodeInterpreter.CodeInterpreterArn

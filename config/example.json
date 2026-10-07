@@ -1,0 +1,19 @@
+{
+  "region": "us-east-1",
+  "network": {
+    "vpc_id": "<existing VPC id, e.g. vpc-0123456789abcdef0>",
+    "private_subnet_ids": ["<private subnet in use1-az1/az2/az4>", "<second private subnet, another AZ>"]
+  },
+  "entra": {
+    "discovery_url": "https://login.microsoftonline.com/<tenant-id>/v2.0/.well-known/openid-configuration",
+    "audience": "<API app registration: Application (client) ID>",
+    "allowed_azp": "<client app registration: Application (client) ID>",
+    "advisor_id_claim": "<access-token claim carrying the advisor id>",
+    "client_id_claim": "<access-token claim carrying the client id>"
+  },
+  "tags": {
+    "Application": "A00000",
+    "Environment": "C0",
+    "Provisioned-By": "CICD"
+  }
+}

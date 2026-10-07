@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+venv/
+# deployment outputs and build caches (environment-specific; state files contain endpoint URLs and IDs)
+cloudformation/.state/
+cloudformation/.build/
+# your environment settings (tenant / VPC ids); only the example is shared
+config/*.json
+!config/example.json

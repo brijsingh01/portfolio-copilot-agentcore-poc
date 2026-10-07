@@ -1,0 +1,27 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  Portfolio Advisory Copilot - the one security group used by every workload in your existing VPC (AgentCore
+  Runtimes, the Code Interpreter and the Lambda tools): no inbound rules, outbound HTTPS only. The private subnets
+  must reach AWS APIs and Microsoft Entra ID over 443 (NAT gateway or VPC endpoints + NAT for login.microsoftonline.com).
+
+Parameters:
+  Prefix:
+    Type: String
+    AllowedPattern: "^[a-z][a-z0-9-]{2,40}$"
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+
+Resources:
+  WorkloadSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub ${Prefix}-workloads
+      GroupDescription: Portfolio Copilot runtimes, code interpreter and Lambda tools - outbound HTTPS only
+      VpcId: !Ref VpcId
+      SecurityGroupEgress:
+        - { IpProtocol: tcp, FromPort: 443, ToPort: 443, CidrIp: 0.0.0.0/0, Description: HTTPS to AWS APIs and Entra ID }
+      Tags: [{ Key: Name, Value: !Sub "${Prefix}-workloads" }]
+
+Outputs:
+  SecurityGroupId:
+    Value: !Ref WorkloadSecurityGroup

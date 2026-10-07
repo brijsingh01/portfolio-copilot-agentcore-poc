@@ -1,0 +1,58 @@
+[
+  {
+    "client_id": "CLIENT-8801",
+    "advisor_id": "ADVISOR-042",
+    "client_name": "Marcus Vance",
+    "risk_profile": "Moderate",
+    "cash_balance": 85000.00,
+    "total_portfolio_value": 204020.00,
+    "holdings": [
+      {
+        "ticker": "AAPL",
+        "asset_class": "Equity",
+        "shares": 120,
+        "avg_cost": 175.20,
+        "current_price": 225.00,
+        "market_value": 27000.00
+      },
+      {
+        "ticker": "MSFT",
+        "asset_class": "Equity",
+        "shares": 80,
+        "avg_cost": 310.00,
+        "current_price": 420.00,
+        "market_value": 33600.00
+      },
+      {
+        "ticker": "VOO",
+        "asset_class": "Index ETF",
+        "shares": 115,
+        "avg_cost": 410.00,
+        "current_price": 508.00,
+        "market_value": 58420.00
+      }
+    ],
+    "esg_mandate": true,
+    "notes": "Prefers passive tech exposure. Nearing retirement in 7 years."
+  },
+  {
+    "client_id": "CLIENT-8802",
+    "advisor_id": "ADVISOR-099",
+    "client_name": "Elena Rostova",
+    "risk_profile": "Aggressive",
+    "cash_balance": 15000.00,
+    "total_portfolio_value": 145000.00,
+    "holdings": [
+      {
+        "ticker": "NVDA",
+        "asset_class": "Equity",
+        "shares": 1000,
+        "avg_cost": 95.00,
+        "current_price": 130.00,
+        "market_value": 130000.00
+      }
+    ],
+    "esg_mandate": false,
+    "notes": "High tech tolerance, unconstrained single-stock limits."
+  }
+]

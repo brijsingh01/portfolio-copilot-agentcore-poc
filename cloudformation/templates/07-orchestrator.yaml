@@ -1,0 +1,290 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  Portfolio Advisory Copilot - Amazon Bedrock Guardrail (advisor prompts and generated recommendations), AgentCore
+  Memory (short-term events + long-term client constraints) and the Orchestrator runtime (HTTP :8080, VPC mode,
+  inbound JWT = shared audience + azp claim). The orchestrator calls the Gateway tools with the user's token,
+  including portfolio analytics on the VPC Code Interpreter, and the Market Analyst agent over A2A.
+
+Parameters:
+  Prefix:
+    Type: String
+    AllowedPattern: "^[a-z][a-z0-9-]{2,40}$"
+  RuntimeNamePrefix:
+    Type: String
+    AllowedPattern: "^[a-zA-Z][a-zA-Z0-9_]{0,30}$"
+  OrchestratorImageUri:
+    Type: String
+  PrivateSubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+  SecurityGroupId:
+    Type: AWS::EC2::SecurityGroup::Id
+  JwtIssuer:
+    Type: String
+  DiscoveryUrl:
+    Type: String
+    AllowedPattern: "^https://.+/\\.well-known/openid-configuration$"
+  JwtAudience:
+    Type: String
+  JwtAzp:
+    Type: String
+    AllowedPattern: "^[A-Za-z0-9_.-]+$"
+  AdvisorIdClaim:
+    Type: String
+  ClientIdClaim:
+    Type: String
+  GatewayUrl:
+    Type: String
+    Description: MCP endpoint of the Gateway (must end with /mcp).
+    AllowedPattern: "^https://.+/mcp$"
+  MarketAnalystRuntimeUrl:
+    Type: String
+  LlmModelId:
+    Type: String
+    Default: amazon.nova-micro-v1:0
+    AllowedPattern: "^amazon\\.nova-.*"
+  OrchestratorSystemPrompt:
+    Type: String
+    MinLength: 20
+    MaxLength: 4000
+    Description: System prompt text (source of truth src/prompts/orchestrator_system.txt, published by the driver)
+  OrchestratorPromptRevision:
+    Type: String
+    AllowedPattern: "^[a-f0-9]{8,64}$"
+    Description: Content hash of the prompt text; a new value publishes a new immutable prompt version
+  EventExpiryDays:
+    Type: Number
+    Default: 90
+    MinValue: 7
+    MaxValue: 365
+  ConstraintsNamespace:
+    Type: String
+    Default: "/clients/{actorId}/constraints"
+
+Resources:
+  # ------------------------------------------------------------------ Bedrock Prompt Management
+  OrchestratorPrompt:
+    Type: AWS::Bedrock::Prompt
+    Properties:
+      Name: !Sub ${Prefix}-orchestrator-system
+      Description: Orchestrator recommendation system prompt (the runtime loads a pinned version)
+      DefaultVariant: default
+      Variants:
+        - Name: default
+          TemplateType: TEXT
+          ModelId: !Ref LlmModelId
+          InferenceConfiguration:
+            Text: { MaxTokens: 600, Temperature: 0.1 }
+          TemplateConfiguration:
+            Text:
+              Text: !Ref OrchestratorSystemPrompt
+      Tags: { project: !Ref Prefix }
+
+  OrchestratorPromptVersion:
+    Type: AWS::Bedrock::PromptVersion
+    Properties:
+      PromptArn: !GetAtt OrchestratorPrompt.Arn
+      Description: !Sub "revision ${OrchestratorPromptRevision}"   # replaced (new version) when the text changes
+      Tags: { project: !Ref Prefix }
+
+  # ------------------------------------------------------------------ Bedrock Guardrail
+  AdvisorGuardrail:
+    Type: AWS::Bedrock::Guardrail
+    Properties:
+      Name: !Sub ${Prefix}-advisor-guardrail
+      Description: Screens advisor prompts and generated recommendations (denied topics, harmful content, prompt attacks, financial PII)
+      BlockedInputMessaging: >-
+        This request can't be processed: it conflicts with Apex Wealth advisory policy (for example guaranteed
+        returns, insider information or sensitive personal data). Please rephrase it.
+      BlockedOutputsMessaging: The generated recommendation was withheld by the advisory guardrail.
+      TopicPolicyConfig:
+        TopicsConfig:
+          - Name: Guaranteed returns
+            Type: DENY
+            Definition: Promising, guaranteeing or assuring a specific investment return or profit, or that an investment cannot lose money.
+            Examples:
+              - Guarantee my client a 20 percent return this year
+              - Promise him he cannot lose money on NVDA
+              - Tell her this fund is risk free and will double
+          - Name: Insider trading
+            Type: DENY
+            Definition: Trading on, obtaining or sharing material non-public information about a company or its securities.
+            Examples:
+              - My friend at the company told me earnings leak tomorrow, buy before the announcement
+              - Use the confidential merger news to trade ahead of the deal
+      ContentPolicyConfig:
+        FiltersConfig:
+          - { Type: HATE, InputStrength: MEDIUM, OutputStrength: MEDIUM }
+          - { Type: INSULTS, InputStrength: MEDIUM, OutputStrength: MEDIUM }
+          - { Type: SEXUAL, InputStrength: MEDIUM, OutputStrength: MEDIUM }
+          - { Type: VIOLENCE, InputStrength: MEDIUM, OutputStrength: LOW }
+          - { Type: MISCONDUCT, InputStrength: MEDIUM, OutputStrength: LOW }
+          - { Type: PROMPT_ATTACK, InputStrength: HIGH, OutputStrength: NONE }
+      SensitiveInformationPolicyConfig:
+        PiiEntitiesConfig:
+          - { Type: US_SOCIAL_SECURITY_NUMBER, Action: BLOCK }
+          - { Type: CREDIT_DEBIT_CARD_NUMBER, Action: BLOCK }
+          - { Type: US_BANK_ACCOUNT_NUMBER, Action: BLOCK }
+      Tags: [{ Key: project, Value: !Ref Prefix }]
+
+  AdvisorGuardrailVersion:
+    Type: AWS::Bedrock::GuardrailVersion
+    Properties:
+      GuardrailIdentifier: !GetAtt AdvisorGuardrail.GuardrailId
+      Description: Version used by the orchestrator
+
+  # ------------------------------------------------------------------ AgentCore Memory
+  Memory:
+    Type: AWS::BedrockAgentCore::Memory
+    Properties:
+      Name: !Sub ${RuntimeNamePrefix}_memory
+      Description: Advisor conversations (short-term) and client constraints (long-term)
+      EventExpiryDuration: !Ref EventExpiryDays
+      MemoryStrategies:
+        - UserPreferenceMemoryStrategy:
+            Name: ClientConstraints
+            Description: Persistent client investment constraints and preferences stated during advisor sessions
+            Namespaces: [!Ref ConstraintsNamespace]
+      Tags: { project: !Ref Prefix }
+
+  # ------------------------------------------------------------------ orchestrator
+  OrchestratorRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${Prefix}-orchestrator-runtime-role
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: bedrock-agentcore.amazonaws.com }
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals: { aws:SourceAccount: !Ref AWS::AccountId }
+              ArnLike: { aws:SourceArn: !Sub "arn:aws:bedrock-agentcore:${AWS::Region}:${AWS::AccountId}:*" }
+      Policies:
+        - PolicyName: runtime
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: PullImage
+                Effect: Allow
+                Action: [ecr:BatchGetImage, ecr:GetDownloadUrlForLayer]
+                Resource: !Sub arn:aws:ecr:${AWS::Region}:${AWS::AccountId}:repository/${Prefix}/orchestrator
+              - Sid: EcrAuth
+                Effect: Allow
+                Action: ecr:GetAuthorizationToken
+                Resource: "*"
+              - Sid: Logs
+                Effect: Allow
+                Action: [logs:CreateLogGroup, logs:CreateLogStream, logs:PutLogEvents, logs:DescribeLogStreams]
+                Resource: !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/bedrock-agentcore/runtimes/*
+              - Sid: DescribeLogs
+                Effect: Allow
+                Action: logs:DescribeLogGroups
+                Resource: !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:*
+              - Sid: Tracing
+                Effect: Allow
+                Action: [xray:PutTraceSegments, xray:PutTelemetryRecords, xray:GetSamplingRules, xray:GetSamplingTargets]
+                Resource: "*"
+              - Sid: Metrics
+                Effect: Allow
+                Action: cloudwatch:PutMetricData
+                Resource: "*"
+                Condition: { StringEquals: { cloudwatch:namespace: bedrock-agentcore } }
+              - Sid: WorkloadIdentity
+                Effect: Allow
+                Action: [bedrock-agentcore:GetWorkloadAccessToken, bedrock-agentcore:GetWorkloadAccessTokenForJWT]
+                Resource:
+                  - !Sub arn:aws:bedrock-agentcore:${AWS::Region}:${AWS::AccountId}:workload-identity-directory/default
+                  - !Sub arn:aws:bedrock-agentcore:${AWS::Region}:${AWS::AccountId}:workload-identity-directory/default/workload-identity/${RuntimeNamePrefix}_*
+              - Sid: NovaOnly
+                Effect: Allow
+                Action: [bedrock:InvokeModel, bedrock:InvokeModelWithResponseStream]
+                Resource:
+                  - !Sub arn:aws:bedrock:*::foundation-model/${LlmModelId}
+                  - !Sub arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:inference-profile/us.${LlmModelId}
+              - Sid: ManagedSystemPrompt
+                Effect: Allow
+                Action: bedrock:GetPrompt
+                Resource: [!GetAtt OrchestratorPrompt.Arn, !Sub "${OrchestratorPrompt.Arn}:*"]
+              - Sid: Guardrail
+                Effect: Allow
+                Action: bedrock:ApplyGuardrail
+                Resource: !GetAtt AdvisorGuardrail.GuardrailArn
+              - Sid: NativeMemory
+                Effect: Allow
+                Action: [bedrock-agentcore:CreateEvent, bedrock-agentcore:ListEvents, bedrock-agentcore:GetEvent,
+                         bedrock-agentcore:RetrieveMemoryRecords]
+                Resource: !GetAtt Memory.MemoryArn
+
+  OrchestratorRuntime:
+    Type: AWS::BedrockAgentCore::Runtime
+    Properties:
+      AgentRuntimeName: !Sub ${RuntimeNamePrefix}_orchestrator
+      Description: Portfolio advisory orchestrator (guardrail, memory, A2A analyst, Gateway tools)
+      RoleArn: !GetAtt OrchestratorRole.Arn
+      AgentRuntimeArtifact:
+        ContainerConfiguration:
+          ContainerUri: !Ref OrchestratorImageUri
+      ProtocolConfiguration: HTTP
+      NetworkConfiguration:
+        NetworkMode: VPC
+        NetworkModeConfig:
+          Subnets: !Ref PrivateSubnetIds
+          SecurityGroups: [!Ref SecurityGroupId]
+      LifecycleConfiguration: { IdleRuntimeSessionTimeout: 900, MaxLifetime: 28800 }
+      AuthorizerConfiguration:
+        CustomJWTAuthorizer:
+          DiscoveryUrl: !Ref DiscoveryUrl
+          AllowedAudience: [!Ref JwtAudience]
+          CustomClaims:
+            - InboundTokenClaimName: azp
+              InboundTokenClaimValueType: STRING
+              AuthorizingClaimMatchValue:
+                ClaimMatchOperator: EQUALS
+                ClaimMatchValue: { MatchValueString: !Ref JwtAzp }
+      RequestHeaderConfiguration:
+        RequestHeaderAllowlist: [Authorization]
+      EnvironmentVariables:
+        JWT_ISSUER: !Ref JwtIssuer
+        JWT_DISCOVERY_URL: !Ref DiscoveryUrl
+        JWT_AUDIENCES: !Ref JwtAudience
+        JWT_ALLOWED_CLIENT_IDS: !Ref JwtAzp
+        JWT_ADVISOR_CLAIM: !Ref AdvisorIdClaim
+        JWT_CLIENT_CLAIM: !Ref ClientIdClaim
+        AWS_REGION: !Ref AWS::Region
+        BEDROCK_MODEL_ID: !Sub us.${LlmModelId}
+        SYSTEM_PROMPT_ID: !GetAtt OrchestratorPrompt.Id
+        SYSTEM_PROMPT_VERSION: !GetAtt OrchestratorPromptVersion.Version
+        BEDROCK_GUARDRAIL_ID: !GetAtt AdvisorGuardrail.GuardrailId
+        BEDROCK_GUARDRAIL_VERSION: !GetAtt AdvisorGuardrailVersion.Version
+        GATEWAY_URL: !Ref GatewayUrl
+        MARKET_ANALYST_URL: !Sub ${MarketAnalystRuntimeUrl}/invocations
+        AGENTCORE_MEMORY_ID: !GetAtt Memory.MemoryId
+        MEMORY_CONSTRAINTS_NAMESPACE: !Ref ConstraintsNamespace
+        OTEL_SERVICE_NAME: orchestrator
+        LOG_LEVEL: INFO
+      Tags: { project: !Ref Prefix }
+
+Outputs:
+  GuardrailId:
+    Value: !GetAtt AdvisorGuardrail.GuardrailId
+  GuardrailArn:
+    Value: !GetAtt AdvisorGuardrail.GuardrailArn
+  GuardrailVersion:
+    Value: !GetAtt AdvisorGuardrailVersion.Version
+  MemoryId:
+    Value: !GetAtt Memory.MemoryId
+  MemoryArn:
+    Value: !GetAtt Memory.MemoryArn
+  OrchestratorRuntimeArn:
+    Value: !GetAtt OrchestratorRuntime.AgentRuntimeArn
+  OrchestratorRuntimeId:
+    Value: !GetAtt OrchestratorRuntime.AgentRuntimeId
+  OrchestratorRuntimeUrl:
+    Value: !Sub https://bedrock-agentcore.${AWS::Region}.amazonaws.com/runtimes/arn%3Aaws%3Abedrock-agentcore%3A${AWS::Region}%3A${AWS::AccountId}%3Aruntime%2F${OrchestratorRuntime.AgentRuntimeId}
+  OrchestratorPromptArn:
+    Value: !GetAtt OrchestratorPrompt.Arn
+  OrchestratorPromptId:
+    Value: !GetAtt OrchestratorPrompt.Id
+  OrchestratorPromptVersion:
+    Value: !GetAtt OrchestratorPromptVersion.Version
