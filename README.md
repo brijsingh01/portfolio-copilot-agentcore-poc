@@ -111,3 +111,7 @@ you built and pushed yourself. See [docs/DEPLOYMENT_GUIDE.md](docs/DEPLOYMENT_GU
 While the stacks are deployed, everything is pay-per-use and costs pennies for test traffic: Nova Micro, Lambda,
 AgentCore Runtime / Gateway / Memory / Code Interpreter, S3 Vectors, on-demand DynamoDB, and CloudWatch logs and
 traces. Your VPC's NAT gateway is the main standing cost, and it is yours. Run `down` when you are finished.
+
+## License
+
+[MIT](LICENSE)
