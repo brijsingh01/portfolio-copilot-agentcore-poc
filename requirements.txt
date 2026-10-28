@@ -1,7 +1,7 @@
 # Exact versions verified end to end (deployed images + unit/E2E tests). Upgrade deliberately, then re-run the tests.
 boto3==1.43.108
 PyJWT[crypto]==2.15.1
-opentelemetry-api==1.44.0
+opentelemetry-api==1.45.1
 opentelemetry-sdk==1.44.0
 opentelemetry-exporter-otlp-proto-http==1.44.0
 aws-opentelemetry-distro==0.21.0
